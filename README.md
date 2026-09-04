@@ -6,7 +6,7 @@ Python / FastAPI backend powering the Vitalis Health app — an AI-powered healt
 
 ## 🚀 Features
 
-- **Gemini AI Chat**: Health-focused conversational AI powered by Google Gemini (`gemini-2.5-flash`), returning structured responses with suggested actions and quick replies.
+- **Gemini AI Chat**: Health-focused conversational AI powered by Google Gemini (`gemini-3.5-flash-lite`), returning structured responses with suggested actions and quick replies.
 - **AI Place Analysis**: Analyzes nearby wellness spots based on user context and location data.
 - **Structured Responses**: All AI output is validated through Pydantic v2 schemas for type safety and predictable JSON.
 - **FastAPI + Pydantic v2**: Automatic request/response validation and interactive Swagger docs at `/docs`.
@@ -60,7 +60,7 @@ All settings are read from environment variables (or a `.env` file in the backen
 | Variable | Default | Description |
 |---|---|---|
 | `GEMINI_API_KEY` | `""` | Google Gemini API key (required for AI endpoints) |
-| `GEMINI_MODEL_NAME` | `gemini-2.5-flash` | Gemini model to use |
+| `GEMINI_MODEL_NAME` | `gemini-3.5-flash-lite` | Gemini model to use |
 | `BACKEND_CORS_ORIGINS` | `["*"]` | Allowed CORS origins |
 | `PORT` | `8000` | Server port (set by Render/Cloud Run automatically) |
 
@@ -95,7 +95,7 @@ This backend is designed to deploy to [Render.com](https://render.com) using Doc
 
 - The service is available at `https://<your-service-name>.onrender.com/`
 - Open `https://<your-service-name>.onrender.com/docs` to verify the Swagger UI
-- The Android app points to `https://vitalis-backend.onrender.com/` in `app/src/main/java/com/vitalis/app/feature/map/di/MapNetworkModule.kt`. **If you change the service name, update that URL.**
+- The Android app points to `https://vitalis-backend-zl85.onrender.com/` in `app/src/main/java/com/vitalis/app/feature/map/di/MapNetworkModule.kt`. **If you change the service name, update that URL.**
 
 ### Notes
 

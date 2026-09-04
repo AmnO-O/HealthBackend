@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # Gemini Configuration (read securely via environment variables for Render / Cloud Run)
     GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
-    GEMINI_MODEL_NAME: str = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.5-flash")
+    GEMINI_MODEL_NAME: str = os.environ.get("GEMINI_MODEL_NAME", "gemini-3.5-flash-lite")
 
     # CORS Configuration
     BACKEND_CORS_ORIGINS: List[str] = ["*"]
