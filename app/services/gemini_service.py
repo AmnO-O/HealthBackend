@@ -1,7 +1,7 @@
 import json
 import logging
 from google import genai
-from google.genai import types
+from google.genai import types, errors
 from typing import List, Dict, Any, Optional
 from app.core.config import settings
 
@@ -51,9 +51,10 @@ CHAT_RESPONSE_SCHEMA = types.Schema(
 
 class GeminiService:
     def __init__(self):
-        self.api_key = settings.GEMINI_API_KEY
+        self.api_keys = settings.gemini_api_keys
         self.model_name = settings.GEMINI_MODEL_NAME
-        self.client = None
+        self._current_key_index = 0
+        self._clients = {}  # Cache clients by key
 
         # Plain text config for non-chat endpoints (e.g. analyze_places)
         self.config = types.GenerateContentConfig(
@@ -92,14 +93,33 @@ class GeminiService:
             response_schema=CHAT_RESPONSE_SCHEMA,
         )
 
-        if self.api_key:
+        if not self.api_keys:
+            logger.warning("No GEMINI_API_KEY found in settings. AI features will be disabled.")
+
+    def _get_client(self) -> Optional[genai.Client]:
+        """Lazily initializes and returns the client for the current API key."""
+        if not self.api_keys:
+            return None
+
+        current_key = self.api_keys[self._current_key_index]
+        if current_key not in self._clients:
             try:
-                self.client = genai.Client(api_key=self.api_key)
-                logger.info(f"Gemini Service initialized with model: {self.model_name}")
+                self._clients[current_key] = genai.Client(api_key=current_key)
+                logger.info(f"Initialized Gemini client for key at index {self._current_key_index}")
             except Exception as e:
-                logger.error(f"Failed to initialize Gemini Service: {e}")
-        else:
-            logger.warning("GEMINI_API_KEY not found in settings. AI features will be disabled.")
+                logger.error(f"Failed to initialize client for key at index {self._current_key_index}: {e}")
+                return None
+        return self._clients[current_key]
+
+    def _rotate_key(self) -> bool:
+        """Rotates to the next available API key. Returns True if rotated, False if only one key exists."""
+        if len(self.api_keys) <= 1:
+            return False
+
+        old_index = self._current_key_index
+        self._current_key_index = (self._current_key_index + 1) % len(self.api_keys)
+        logger.warning(f"Rotating Gemini API key from index {old_index} to {self._current_key_index}")
+        return True
 
     def _map_history(self, history: List[Dict[str, str]]) -> List[types.Content]:
         """Maps incoming history dictionaries to SDK Content objects."""
@@ -136,55 +156,110 @@ class GeminiService:
                 "quick_replies": [],
             }
 
-    async def get_chat_response(self, message: str, history: List[Dict[str, str]] = None) -> Dict[str, Any]:
-        """Health and wellness chat response with structured actions.
-        
-        Returns a dict with 'message', 'suggested_actions', and 'quick_replies'.
-        """
-        if not self.client:
-            return {
-                "message": "AI service is currently unavailable. Please check API configuration.",
-                "suggested_actions": [],
-                "quick_replies": [],
-            }
+    async def get_chat_response(
+        self,
+        message: str,
+        history: List[Dict[str, str]] = None,
+        image_base64: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Health and wellness chat response with optional image support and API rotation."""
 
-        logger.info(f"Chat Request - Message: {message[:100]}...")
-        try:
-            # Map history to types.Content
-            sdk_history = self._map_history(history or [])
+        # Determine number of attempts (max one per key)
+        num_attempts = len(self.api_keys) if self.api_keys else 1
 
-            # Start a chat session with the provided history and structured config
-            chat = self.client.aio.chats.create(
-                model=self.model_name,
-                history=sdk_history,
-                config=self.chat_config
-            )
+        last_error = "No API keys configured."
 
-            # Send the message within the session
-            response = await chat.send_message(message)
-            raw_text = response.text
-            logger.info(f"Chat Response (raw): {raw_text[:200]}...")
+        for attempt in range(num_attempts):
+            client = self._get_client()
+            if not client:
+                last_error = "Failed to initialize AI client."
+                if self._rotate_key(): continue
+                break
 
-            # Parse the structured JSON response
-            result = self._parse_structured_response(raw_text)
-            logger.info(f"Parsed response - Actions: {len(result['suggested_actions'])}, Quick replies: {len(result['quick_replies'])}")
-            return result
-        except Exception as e:
-            logger.error(f"Error in Gemini chat: {e}")
-            return {
-                "message": f"I'm sorry, I encountered an error while processing your request: {str(e)}",
-                "suggested_actions": [],
-                "quick_replies": [],
-            }
+            logger.info(f"Chat Request (Attempt {attempt+1}/{num_attempts}) - Has Image: {image_base64 is not None}")
+            try:
+                sdk_history = self._map_history(history or [])
+                message_parts = [types.Part(text=message)]
 
-    async def analyze_places(self, user_context: str, places: List[Dict[str, Any]]) -> str:
-        """Analyzes a list of places based on user's health context (single-turn)."""
-        if not self.client:
-            return "AI analysis is currently unavailable."
+                if image_base64:
+                    b64_data = image_base64
+                    mime_type = "image/jpeg"
+                    if "," in b64_data:
+                        header, b64_data = b64_data.split(",", 1)
+                        if "image/png" in header: mime_type = "image/png"
+                        elif "image/webp" in header: mime_type = "image/webp"
 
-        logger.info(f"Analysis Request - Context: {user_context[:100]}..., Places Count: {len(places)}")
+                    message_parts.append(
+                        types.Part(
+                            inline_data=types.Blob(
+                                data=b64_data,
+                                mime_type=mime_type
+                            )
+                        )
+                    )
+
+                chat = client.aio.chats.create(
+                    model=self.model_name,
+                    history=sdk_history,
+                    config=self.chat_config
+                )
+
+                response = await chat.send_message(message_parts)
+
+                # Guard against blocked or empty responses
+                raw_text = getattr(response, "text", None)
+                if not raw_text:
+                    finish_reason = "UNKNOWN"
+                    try:
+                        finish_reason = response.candidates[0].finish_reason
+                    except (AttributeError, IndexError):
+                        pass
+
+                    error_msg = {
+                        "SAFETY": "I'm sorry, but I can't fulfill this request as it was flagged by safety filters.",
+                        "RECITATION": "The response was blocked due to recitation policy.",
+                        "OTHER": "The AI was unable to generate a response for this query.",
+                    }.get(finish_reason, "The AI returned an empty response. Please try rephrasing.")
+
+                    return {
+                        "message": error_msg,
+                        "suggested_actions": [],
+                        "quick_replies": ["Can you try a different question?"],
+                    }
+
+                return self._parse_structured_response(raw_text)
+
+            except Exception as e:
+                status_code = getattr(e, 'code', None)
+                # 429 = Too Many Requests (Quota), 500/503 = Server errors
+                if status_code in [429, 500, 503] or "quota" in str(e).lower():
+                    last_error = str(e)
+                    rotated = self._rotate_key()
+                    if attempt < num_attempts - 1 and rotated:
+                        logger.warning(f"Retryable error {status_code} on key index {(self._current_key_index - 1) % num_attempts}. Rotating...")
+                        continue
+                    else:
+                        logger.error(f"Quota exhausted on all keys tried.")
+
+                # Non-retryable error (400, 401, 403, etc.)
+                logger.error(f"Permanent error on key at index {self._current_key_index}: {e}")
+                last_error = str(e)
+                break
+
+        return {
+            "message": f"I'm sorry, I encountered an error while processing your request: {last_error}",
+            "suggested_actions": [],
+            "quick_replies": [],
+        }
+
+    async def analyze_places(self, user_context: str, places: List[Any]) -> str:
+        """Analyzes a list of places with API rotation support."""
+        num_attempts = len(self.api_keys) if self.api_keys else 1
+        last_error = "AI analysis is currently unavailable."
+
+        # Construction using Pydantic model attributes
         places_str = "\n".join([
-            f"- {p['name']} ({p['category']}): {p.get('subtitle') or p['address']}"
+            f"- {p.name} ({p.category}): {p.subtitle or p.address}"
             for p in places
         ])
 
@@ -195,18 +270,37 @@ class GeminiService:
             "for the user's specific context. Provide brief, actionable insights for each recommended spot."
         )
 
-        try:
-            # Use generate_content for single-turn analysis (plain text, no structured output)
-            response = await self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=self.config
-            )
-            logger.info(f"Analysis Response - Text: {response.text[:100]}...")
-            return response.text
-        except Exception as e:
-            logger.error(f"Error in Gemini place analysis: {e}")
-            return "Failed to analyze places. Please try again later."
+        for attempt in range(num_attempts):
+            client = self._get_client()
+            if not client:
+                if self._rotate_key(): continue
+                break
+
+            try:
+                response = await client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=self.config
+                )
+
+                raw_text = getattr(response, "text", None)
+                if not raw_text:
+                    return "The AI was unable to analyze these locations at this time."
+
+                return raw_text
+            except Exception as e:
+                status_code = getattr(e, 'code', None)
+                if status_code in [429, 500, 503] or "quota" in str(e).lower():
+                    last_error = str(e)
+                    rotated = self._rotate_key()
+                    if attempt < num_attempts - 1 and rotated:
+                        logger.warning(f"Retryable error {status_code} in analyze_places on key index {(self._current_key_index - 1) % num_attempts}")
+                        continue
+                logger.error(f"Permanent error in analyze_places on key index {self._current_key_index}: {e}")
+                last_error = str(e)
+                break
+
+        return f"Failed to analyze places: {last_error}"
 
 # Singleton instance
 gemini_service = GeminiService()

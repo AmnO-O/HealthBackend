@@ -11,9 +11,17 @@ class Settings(BaseSettings):
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api/v1"
 
-    # Gemini Configuration (read securely via environment variables for Render / Cloud Run)
+    # Gemini Configuration (read securely via environment variables)
+    # Support multiple keys separated by commas for rotation
     GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
     GEMINI_MODEL_NAME: str = os.environ.get("GEMINI_MODEL_NAME", "gemini-3.5-flash-lite")
+
+    @property
+    def gemini_api_keys(self) -> List[str]:
+        """Returns a list of cleaned API keys from the comma-separated string."""
+        if not self.GEMINI_API_KEY:
+            return []
+        return [k.strip() for k in self.GEMINI_API_KEY.split(",") if k.strip()]
 
     # CORS Configuration
     BACKEND_CORS_ORIGINS: List[str] = ["*"]

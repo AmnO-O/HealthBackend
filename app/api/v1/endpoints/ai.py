@@ -13,19 +13,28 @@ async def ai_ping():
 
 @router.post("/chat", response_model=AIResponse)
 async def ai_chat(request: AIChatRequest):
-    """Health-focused AI chat powered by Gemini with structured action chips."""
-    logger.info(f"AI Chat endpoint hit with message: {request.message[:50]}...")
-    result = await gemini_service.get_chat_response(request.message, request.history)
+    """Health-focused AI chat powered by Gemini with structured action chips and image support."""
+    logger.info(f"AI Chat endpoint hit. Message length: {len(request.message)}, Has image: {request.image_base64 is not None}")
+
+    result = await gemini_service.get_chat_response(
+        message=request.message,
+        history=request.history,
+        image_base64=request.image_base64
+    )
 
     # Map the raw dicts from Gemini into validated SuggestedAction models
-    actions = [
-        SuggestedAction(
-            label=a.get("label", "Action"),
-            type=a.get("type", "CUSTOM"),
-            icon=a.get("icon", "check")
-        )
-        for a in result.get("suggested_actions", [])
-    ]
+    actions = []
+    for a in result.get("suggested_actions", []):
+        try:
+            actions.append(
+                SuggestedAction(
+                    label=a.get("label", "Action"),
+                    type=a.get("type", "CUSTOM"),
+                    icon=a.get("icon", "check")
+                )
+            )
+        except Exception as e:
+            logger.warning(f"Skipping invalid action chip from AI: {a}. Error: {e}")
 
     return AIResponse(
         response=result.get("message", ""),
